@@ -148,16 +148,25 @@ input:focus,textarea:focus,select:focus{border-color:#3b82f6}
 <!-- Settings modal -->
 <div id="settings" class="overlay hidden">
   <div class="modal-box">
-    <div style="font-size:13px;font-weight:500;color:#93c5fd;margin-bottom:8px">⚙ API Key</div>
+    <div style="font-size:13px;font-weight:500;color:#93c5fd;margin-bottom:8px">⚙ API Settings</div>
     <div style="font-size:11px;color:#475569;margin-bottom:14px;line-height:1.7">
       Stored only in this browser's localStorage.<br>Never in source code, never uploaded anywhere.
     </div>
+    <div style="margin-bottom:10px"><div class="lbl">AI Provider</div>
+      <select id="s-provider" style="width:100%">
+        <option value="anthropic">Anthropic (Claude)</option>
+        <option value="gemini">Google (Gemini)</option>
+      </select>
+    </div>
     <div style="margin-bottom:10px"><div class="lbl">Anthropic API Key</div>
       <input id="s-key" type="password" placeholder="sk-ant-…" style="width:100%;font-family:monospace"></div>
-    <div style="font-size:10px;color:#334155;margin-bottom:16px">Get yours at console.anthropic.com → API Keys</div>
+    <div style="font-size:10px;color:#334155;margin-bottom:12px">Get yours at console.anthropic.com → API Keys</div>
+    <div style="margin-bottom:10px"><div class="lbl">Gemini API Key</div>
+      <input id="s-gemini-key" type="password" placeholder="AIza…" style="width:100%;font-family:monospace"></div>
+    <div style="font-size:10px;color:#334155;margin-bottom:16px">Get yours at aistudio.google.com → API Keys</div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button onclick="closeSettings()" style="padding:6px 12px;background:transparent;border:1px solid #334155;border-radius:6px;color:#94a3b8;cursor:pointer;font-size:12px">Cancel</button>
-      <button onclick="saveSettings()" style="padding:6px 12px;background:#1d4ed8;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:12px">Save Key</button>
+      <button onclick="saveSettings()" style="padding:6px 12px;background:#1d4ed8;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:12px">Save</button>
     </div>
   </div>
 </div>
@@ -237,14 +246,24 @@ function computeLayout(nodes,edges){
     arr.forEach((n,i)=>{const x=arr.length<=1?500:80+(sp/Math.max(arr.length-1,1))*i;sn.push({id:n.id,x,y,level:n.level,duration:n.duration||0,importanceScore:n.importanceScore||50,r:nodeR(n.importanceScore||50)});});
   });
   const nm={};sn.forEach(n=>nm[n.id]=n);
+  // Count connections per node to spread highly-connected nodes further apart
+  const degMap={};
+  edges.forEach(e=>{degMap[e.source]=(degMap[e.source]||0)+1;degMap[e.target]=(degMap[e.target]||0)+1;});
   const sim=d3.forceSimulation(sn)
-    .force('link',d3.forceLink(edges.map(e=>({source:e.source,target:e.target}))).id(d=>d.id).distance(lk=>{const t=typeof lk.target==='object'?lk.target:nm[lk.target];return Math.max(100,Math.min(480,100+(t?.duration||7)*2));}).strength(0.22))
-    .force('charge',d3.forceManyBody().strength(-700))
+    .force('link',d3.forceLink(edges.map(e=>({source:e.source,target:e.target}))).id(d=>d.id).distance(lk=>{
+      const s=typeof lk.source==='object'?lk.source:nm[lk.source];
+      const t=typeof lk.target==='object'?lk.target:nm[lk.target];
+      const baseDist=Math.max(120,Math.min(500,120+(t?.duration||7)*2));
+      // Push apart nodes with many connections to reduce edge overlap
+      const degBonus=((degMap[s?.id]||1)+(degMap[t?.id]||1))*8;
+      return baseDist+degBonus;
+    }).strength(0.18))
+    .force('charge',d3.forceManyBody().strength(-1200).distanceMax(800))
     .force('y',d3.forceY(d=>LY[d.level]||440).strength(0.92))
-    .force('x',d3.forceX(500).strength(0.025))
-    .force('collide',d3.forceCollide(d=>d.r+28))
+    .force('x',d3.forceX(500).strength(0.02))
+    .force('collide',d3.forceCollide(d=>d.r+42).strength(0.85))
     .stop();
-  for(let i=0;i<800;i++)sim.tick();
+  for(let i=0;i<1000;i++)sim.tick();
   const pm={};sn.forEach(n=>pm[n.id]={x:Math.round(n.x),y:Math.round(n.y)});
   return nodes.map(n=>({...n,position:pm[n.id]||{x:500,y:440}}));
 }
@@ -386,11 +405,29 @@ function drawCanvas(){
     gr.on('dblclick',ev=>{ev.stopPropagation();ev.preventDefault();openEdit(n.id);});
     gr.on('contextmenu',ev=>{ev.preventDefault();ev.stopPropagation();onNodeRC(n.id);});
 
-    // Touch long-press for connect
-    let lpT=null;
-    gr.on('touchstart',ev=>{ev.preventDefault();lpT=setTimeout(()=>{lpT=null;onNodeRC(n.id);scheduleRedraw();},600);},true);
-    gr.on('touchend',()=>{if(lpT){clearTimeout(lpT);lpT=null;}});
-    gr.on('touchmove',()=>{if(lpT){clearTimeout(lpT);lpT=null;}});
+    // Touch: tap=select, double-tap=edit, long-press=connect
+    let lpT=null,lastTap=0,tapCount=0,tapTimer=null;
+    gr.on('touchstart',ev=>{
+      const now=Date.now();
+      lpT=setTimeout(()=>{lpT=null;onNodeRC(n.id);scheduleRedraw();},600);
+      // Double-tap detection
+      if(now-lastTap<350){tapCount++;clearTimeout(tapTimer);tapTimer=null;}
+      else{tapCount=1;}
+      lastTap=now;
+    },{passive:true});
+    gr.on('touchend',ev=>{
+      if(lpT){clearTimeout(lpT);lpT=null;}
+      if(tapCount>=2){
+        // Double-tap: open edit
+        tapCount=0;clearTimeout(tapTimer);tapTimer=null;
+        ev.preventDefault();
+        openEdit(n.id);
+      }else{
+        // Single tap: wait to confirm it's not a double-tap
+        tapTimer=setTimeout(()=>{tapCount=0;if(!dragSt?.moved)onNodeClick(n.id);},350);
+      }
+    });
+    gr.on('touchmove',()=>{if(lpT){clearTimeout(lpT);lpT=null;}tapCount=0;clearTimeout(tapTimer);tapTimer=null;});
   });
 
   updateLeftPanel();
@@ -519,9 +556,19 @@ function toggleLeft(){S.leftOpen=!S.leftOpen;document.getElementById('left').cla
 function toggleRight(){S.rightOpen=!S.rightOpen;document.getElementById('right').classList.toggle('closed',!S.rightOpen);document.getElementById('btn-ai').classList.toggle('on',S.rightOpen);}
 
 // ── SETTINGS ───────────────────────────────────────────────────
-function openSettings(){document.getElementById('s-key').value=localStorage.getItem('apiKey')||'';document.getElementById('settings').classList.remove('hidden');setTimeout(()=>document.getElementById('s-key').focus(),60);}
+function openSettings(){
+  document.getElementById('s-key').value=localStorage.getItem('apiKey')||'';
+  document.getElementById('s-gemini-key').value=localStorage.getItem('geminiApiKey')||'';
+  document.getElementById('s-provider').value=localStorage.getItem('aiProvider')||'anthropic';
+  document.getElementById('settings').classList.remove('hidden');
+}
 function closeSettings(){document.getElementById('settings').classList.add('hidden');}
-function saveSettings(){const k=document.getElementById('s-key').value.trim();localStorage.setItem('apiKey',k);closeSettings();showToast('API key saved ✓');}
+function saveSettings(){
+  localStorage.setItem('apiKey',document.getElementById('s-key').value.trim());
+  localStorage.setItem('geminiApiKey',document.getElementById('s-gemini-key').value.trim());
+  localStorage.setItem('aiProvider',document.getElementById('s-provider').value);
+  closeSettings();showToast('Settings saved ✓');
+}
 function showToast(msg,ms=2500){const t=document.getElementById('toast');t.innerHTML=`<span style="font-size:12px;color:#94a3b8">${esc(msg)}</span>`;t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),ms);}
 
 // ── AI CHAT ────────────────────────────────────────────────────
@@ -541,26 +588,40 @@ function addMsg(role,text,actions){
   if(actions?.length){const a=document.createElement('div');a.style.cssText='margin-top:4px;color:#60a5fa;font-size:9px;border-top:1px solid #0a1e38;padding-top:4px';a.textContent=`✎ ${actions.length} edit${actions.length>1?'s':''} applied`;d.appendChild(a);}
   el.appendChild(d);el.scrollTop=el.scrollHeight;return d;
 }
+function buildSystemPrompt(topo){
+  return `You are a research planning AI for a PhD student in biomedical microfluidics/NP drug delivery at UTokyo.\n\nLIVE CANVAS:\n${JSON.stringify(topo,null,2)}\n\nRespond ONLY with valid JSON (no fences):\n{"message":"...","actions":[...]}\n\nActions: add_node(id,label,description,status,level,position{x,y},timeEstimate,importanceScore 0-100,duration days,isCurrent), update_node(id,changes), delete_node(id), add_edge(id,source,target,label), delete_edge(id).\n\nRules: isCurrent marks current focus (one at a time); importanceScore drives circle size; duration<=3=green,<=14=blue,<=30=yellow,>30=red; update isCurrent when user describes current work; score new ideas 0-100 by downstream impact. No edits="actions":[].`;
+}
+async function callAnthropic(key,sp,hist){
+  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1800,system:sp,messages:hist})});
+  const data=await res.json();
+  if(data.error)throw new Error(data.error.message);
+  return data.content?.[0]?.text||'{}';
+}
+async function callGemini(key,sp,hist){
+  const contents=hist.map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content}]}));
+  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(key)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system_instruction:{parts:[{text:sp}]},contents,generationConfig:{maxOutputTokens:1800}})});
+  const data=await res.json();
+  if(data.error)throw new Error(data.error.message);
+  return data.candidates?.[0]?.content?.parts?.[0]?.text||'{}';
+}
 async function sendAI(over){
   const msg=(over||document.getElementById('chat-input').value).trim();if(!msg)return;
-  const key=localStorage.getItem('apiKey')||'';
-  if(!key){openSettings();showToast('Enter your API key first',3500);return;}
+  const provider=localStorage.getItem('aiProvider')||'anthropic';
+  const key=provider==='gemini'?localStorage.getItem('geminiApiKey')||'':localStorage.getItem('apiKey')||'';
+  if(!key){openSettings();showToast(`Enter your ${provider==='gemini'?'Gemini':'Anthropic'} API key first`,3500);return;}
   document.getElementById('chat-input').value='';
   addMsg('user',msg);chatHist.push({role:'user',content:msg});
   const loading=addMsg('assistant','Analyzing canvas…');
   const c=getC();
   const topo={nodes:c.nodes.map(n=>({id:n.id,label:n.label,description:n.description,status:n.status,level:n.level,timeEstimate:n.timeEstimate,importanceScore:n.importanceScore||50,duration:n.duration||0,isCurrent:!!n.isCurrent})),edges:c.edges.map(e=>({id:e.id,source:e.source,target:e.target,label:e.label}))};
-  const sp=`You are a research planning AI for a PhD student in biomedical microfluidics/NP drug delivery at UTokyo.\n\nLIVE CANVAS:\n${JSON.stringify(topo,null,2)}\n\nRespond ONLY with valid JSON (no fences):\n{"message":"...","actions":[...]}\n\nActions: add_node(id,label,description,status,level,position{x,y},timeEstimate,importanceScore 0-100,duration days,isCurrent), update_node(id,changes), delete_node(id), add_edge(id,source,target,label), delete_edge(id).\n\nRules: isCurrent marks current focus (one at a time); importanceScore drives circle size; duration<=3=green,<=14=blue,<=30=yellow,>30=red; update isCurrent when user describes current work; score new ideas 0-100 by downstream impact. No edits="actions":[].`;
+  const sp=buildSystemPrompt(topo);
   try{
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1800,system:sp,messages:chatHist.slice(-6)})});
-    const data=await res.json();
-    if(data.error){loading.textContent='Error: '+data.error.message;return;}
-    const raw=data.content?.[0]?.text||'{}';
+    const raw=provider==='gemini'?await callGemini(key,sp,chatHist.slice(-6)):await callAnthropic(key,sp,chatHist.slice(-6));
     let parsed;try{parsed=JSON.parse(raw.replace(/```json|```/g,'').trim());}catch{parsed={message:raw,actions:[]};}
     loading.remove();addMsg('assistant',parsed.message||'Done.',parsed.actions||[]);
     chatHist.push({role:'assistant',content:parsed.message||'Done.'});
     if(parsed.actions?.length)applyActions(parsed.actions);
-  }catch(err){loading.textContent='Network error: '+err.message;}
+  }catch(err){loading.textContent='Error: '+err.message;}
 }
 function applyActions(actions){
   mutC(c=>{
@@ -580,7 +641,7 @@ function applyActions(actions){
 // ── RESPONSIVE HINT ────────────────────────────────────────────
 function updateHint(){
   const mobile=window.innerWidth<600;
-  document.getElementById('hint-text').textContent=mobile?'dbl-tap bg = add · long-press ×2 = connect · dbl-tap edge = remove':'dbl-click bg = add · right-click ×2 = connect · dbl-click edge = remove · dbl-click node = edit';
+  document.getElementById('hint-text').textContent=mobile?'dbl-tap bg = add · dbl-tap node = edit · long-press ×2 = connect · pinch = zoom':'dbl-click bg = add · right-click ×2 = connect · dbl-click edge = remove · dbl-click node = edit';
 }
 window.addEventListener('resize',updateHint);
 updateHint();
@@ -592,7 +653,7 @@ initQuickBtns();
 if(!S.leftOpen)document.getElementById('left').classList.add('closed');
 if(!S.rightOpen){document.getElementById('right').classList.add('closed');}
 else{document.getElementById('btn-ai').classList.add('on');}
-if(!localStorage.getItem('apiKey'))setTimeout(()=>showToast('⚙ Click the gear icon to add your Anthropic API key',5000),1200);
+if(!localStorage.getItem('apiKey')&&!localStorage.getItem('geminiApiKey'))setTimeout(()=>showToast('⚙ Click the gear icon to add your API key',5000),1200);
 
 if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
 </script>
