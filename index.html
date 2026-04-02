@@ -68,6 +68,7 @@ input:focus,textarea:focus,select:focus{border-color:#3b82f6}
     <input id="canvas-name" style="background:transparent;border:none;color:#93c5fd;font-size:12px;font-weight:500;outline:none;min-width:80px;max-width:130px" onchange="renameCanvas(this.value)">
     <div style="flex:1;min-width:4px"></div>
     <span id="zoom-badge" style="font-size:9px;color:#334155;padding:2px 6px;background:#040c1a;border:1px solid #0a1e38;border-radius:4px;flex-shrink:0">100%</span>
+    <button class="btn" onclick="openGenModal()" title="AI Generate Project" style="background:#0c2a4e;border-color:#2563eb;color:#60a5fa">+ AI Map</button>
     <button class="btn" onclick="openSettings()" title="API Key">⚙</button>
     <button class="btn" id="btn-ai" onclick="toggleRight()">AI</button>
   </div>
@@ -105,6 +106,25 @@ input:focus,textarea:focus,select:focus{border-color:#3b82f6}
 
 <div id="rc-banner" class="hidden">Source selected → right-click (or long-press) target to connect</div>
 <div id="toast" class="hidden"></div>
+
+<!-- AI Generate Project modal -->
+<div id="gen-modal" class="overlay hidden">
+  <div class="modal-box" style="width:420px">
+    <div style="font-size:13px;font-weight:500;color:#93c5fd;margin-bottom:6px">AI Generate Research Map</div>
+    <div style="font-size:10px;color:#475569;margin-bottom:12px;line-height:1.6">
+      Describe your research project in natural language. Gemini AI will break it into phases, tasks, and dependencies, then create a new canvas automatically.
+    </div>
+    <div style="margin-bottom:10px">
+      <div class="lbl">Project Description</div>
+      <textarea id="gen-input" rows="6" style="width:100%;resize:vertical;font-size:12px" placeholder="e.g. I want to study the effect of nanoparticle size on drug delivery efficiency in microfluidic channels. I need to do literature review, design experiments, fabricate chips, run simulations, collect data, and write a paper for a conference in 6 months."></textarea>
+    </div>
+    <div id="gen-status" style="font-size:10px;color:#fbbf24;margin-bottom:8px;display:none"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button onclick="closeGenModal()" style="padding:6px 12px;background:transparent;border:1px solid #334155;border-radius:6px;color:#94a3b8;cursor:pointer;font-size:12px">Cancel</button>
+      <button id="gen-btn" onclick="generateProject()" style="padding:6px 12px;background:#1d4ed8;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:12px">Generate</button>
+    </div>
+  </div>
+</div>
 
 <!-- Edit modal -->
 <div id="modal" class="overlay hidden">
@@ -636,6 +656,145 @@ function applyActions(actions){
     return{...c,nodes,edges};
   });
   scheduleSave();scheduleRedraw();
+}
+
+// ── AI GENERATE PROJECT ───────────────────────────────────
+function openGenModal(){
+  const key=localStorage.getItem('geminiApiKey')||'';
+  if(!key){openSettings();showToast('Please set your Gemini API key first',3500);return;}
+  document.getElementById('gen-input').value='';
+  document.getElementById('gen-status').style.display='none';
+  document.getElementById('gen-btn').disabled=false;
+  document.getElementById('gen-modal').classList.remove('hidden');
+}
+function closeGenModal(){document.getElementById('gen-modal').classList.add('hidden');}
+
+async function generateProject(){
+  const input=document.getElementById('gen-input').value.trim();
+  if(!input){showToast('Please describe your research project');return;}
+  const key=localStorage.getItem('geminiApiKey')||'';
+  if(!key){openSettings();showToast('Please set your Gemini API key first',3500);return;}
+
+  const status=document.getElementById('gen-status');
+  const btn=document.getElementById('gen-btn');
+  status.style.display='block';status.textContent='Generating project plan...';
+  btn.disabled=true;btn.textContent='Generating...';
+
+  const prompt='You are an experienced research project management expert. Your task is to listen to the user\'s research idea and scientifically divide it into multiple phases with concrete executable tasks.\n\nTask requirements:\n1. Based on the user\'s input, infer the needed project phases (e.g., Literature Review, Experiment Design, Data Collection, Paper Writing, etc.).\n2. Generate specific task nodes for each phase.\n3. Estimate each task\'s duration in days and difficulty level (1-5).\n4. Define prerequisite dependencies between tasks (prerequisites should contain the node_id of dependent tasks).\n5. Use node_id format: lowercase letters and numbers with underscores only (e.g., task_01, task_02).\n6. If the user\'s input lacks detail, still generate a reasonable project structure, but add a node with node_id "info_needed" suggesting what details the user should provide.\n\nCRITICAL RULES:\n- All string values in JSON must be single-line. Never use newline characters inside any string value.\n- prerequisites array must only contain node_id values that exist in other nodes. Use empty array [] if no prerequisites.\n- estimated_days and difficulty_level must be numbers, not strings.\n\nUser input: '+input;
+
+  const responseSchema={
+    type:'OBJECT',
+    properties:{
+      project_name:{type:'STRING'},
+      total_estimated_days:{type:'INTEGER'},
+      nodes:{type:'ARRAY',items:{type:'OBJECT',properties:{
+        node_id:{type:'STRING'},phase_name:{type:'STRING'},task_name:{type:'STRING'},
+        description:{type:'STRING'},estimated_days:{type:'INTEGER'},
+        difficulty_level:{type:'INTEGER'},prerequisites:{type:'ARRAY',items:{type:'STRING'}}
+      },required:['node_id','phase_name','task_name','description','estimated_days','difficulty_level','prerequisites']}}
+    },
+    required:['project_name','total_estimated_days','nodes']
+  };
+
+  try{
+    const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        contents:[{parts:[{text:prompt}]}],
+        generationConfig:{
+          maxOutputTokens:4096,
+          response_mime_type:'application/json',
+          response_schema:responseSchema
+        }
+      })
+    });
+    const resText=await res.text();
+    let data;
+    try{data=JSON.parse(resText);}catch{throw new Error('API returned invalid response: '+resText.slice(0,200));}
+    if(data.error)throw new Error(data.error.message);
+    // Check for blocked/empty candidates
+    if(!data.candidates?.length){
+      const reason=data.promptFeedback?.blockReason||'unknown';
+      throw new Error('Response blocked by Gemini (reason: '+reason+'). Try rephrasing your input.');
+    }
+    const candidate=data.candidates[0];
+    if(candidate.finishReason&&candidate.finishReason!=='STOP'&&candidate.finishReason!=='MAX_TOKENS'){
+      throw new Error('Gemini stopped generation (reason: '+candidate.finishReason+'). Try rephrasing.');
+    }
+    let raw=candidate.content?.parts?.[0]?.text||'';
+    if(!raw)throw new Error('Empty response from Gemini. Check API key and network.');
+    console.log('[AI Map] Raw Gemini response:',raw.slice(0,500));
+    raw=raw.replace(/```json|```/g,'').trim();
+
+    let plan;
+    try{plan=JSON.parse(raw);}catch(e1){
+      // Fix: replace unescaped newlines/tabs inside string values
+      const fixed=raw.replace(/"(?:[^"\\]|\\.)*"/g,m=>m.replace(/\n/g,'\\n').replace(/\r/g,'').replace(/\t/g,' '));
+      try{plan=JSON.parse(fixed);}catch(e2){
+        const m=raw.match(/\{[\s\S]*\}/);
+        if(m){try{plan=JSON.parse(m[0]);}catch{throw new Error('JSON parse failed. Raw: '+raw.slice(0,300));}}
+        else throw new Error('JSON parse failed. Raw: '+raw.slice(0,300));
+      }
+    }
+    if(!plan.nodes?.length)throw new Error('No tasks generated. Raw: '+raw.slice(0,200));
+
+    // Convert Gemini output to canvas format
+    const levelMap={};const phases=[...new Set(plan.nodes.map(n=>n.phase_name))];
+    phases.forEach((p,i)=>{
+      if(i===0)levelMap[p]='macro';
+      else if(i===phases.length-1)levelMap[p]='macro';
+      else levelMap[p]=i%2===0?'meso':'micro';
+    });
+    // Better level assignment: first phase=macro, middle=meso, detail tasks=micro
+    if(phases.length<=3)phases.forEach((p,i)=>levelMap[p]=['macro','meso','micro'][i]||'micro');
+    else{
+      phases.forEach((p,i)=>{
+        const ratio=i/(phases.length-1);
+        levelMap[p]=ratio<0.25?'macro':ratio<0.75?'meso':'micro';
+      });
+    }
+
+    const statusFromDifficulty=d=>d>=4?'blocked':d>=3?'idea':'idea';
+    const nodes=plan.nodes.map(n=>({
+      id:n.node_id,
+      label:n.task_name,
+      description:n.description+(n.phase_name?`\n[Phase: ${n.phase_name}]`:''),
+      status:statusFromDifficulty(n.difficulty_level),
+      level:levelMap[n.phase_name]||'micro',
+      timeEstimate:fmtD(n.estimated_days)||n.estimated_days+'d',
+      importanceScore:Math.min(100,Math.max(10,n.difficulty_level*20)),
+      duration:n.estimated_days||7,
+      isCurrent:false
+    }));
+    // Mark the first non-prerequisite node as current
+    const hasPrereq=new Set(plan.nodes.filter(n=>n.prerequisites?.length).map(n=>n.node_id));
+    const firstStart=nodes.find(n=>!hasPrereq.has(n.id));
+    if(firstStart)firstStart.isCurrent=true;
+
+    const edges=[];
+    const nodeIds=new Set(nodes.map(n=>n.id));
+    plan.nodes.forEach(n=>{
+      (n.prerequisites||[]).forEach(pre=>{
+        if(nodeIds.has(pre)&&pre!==n.node_id){
+          edges.push({id:uid(),source:pre,target:n.node_id,label:''});
+        }
+      });
+    });
+
+    // Create new canvas with layout
+    const laid=computeLayout(nodes,edges);
+    const canvas={id:uid(),name:plan.project_name||'AI Generated Project',nodes:laid,edges};
+    S.canvases.push(canvas);S.activeId=canvas.id;
+    scheduleSave();initCanvas();
+    closeGenModal();
+    showToast(`Project generated: ${nodes.length} tasks, ~${plan.total_estimated_days||'?'} days`,4000);
+
+  }catch(err){
+    status.textContent='Error: '+err.message;status.style.color='#f87171';
+  }finally{
+    btn.disabled=false;btn.textContent='Generate';
+  }
 }
 
 // ── RESPONSIVE HINT ────────────────────────────────────────────
